@@ -39,7 +39,7 @@ jobs:
             .
 
       - name: Scan image for critical vulnerabilities
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.33.0
         with:
           image-ref: devops-assessment-app:${{ github.sha }}
           format: table
