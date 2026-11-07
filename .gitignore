@@ -1,3 +1,8 @@
+# Terraform execution plans
+tfplan
+*.tfplan
+*.tfplan.*
+plan.txt
 # Temporary Terraform AWS connectivity test
 /terraform/
 # Terraform

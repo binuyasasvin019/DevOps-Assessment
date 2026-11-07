@@ -108,7 +108,7 @@ resource "aws_ecs_service" "app" {
   health_check_grace_period_seconds = 60
 
   depends_on = [
-    aws_lb_listener.http,
+    aws_lb_listener_rule.cloudfront_only,
     aws_iam_role_policy_attachment.ecs_execution
   ]
 

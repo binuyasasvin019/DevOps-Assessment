@@ -40,3 +40,12 @@ output "waf_web_acl_arn" {
   description = "ARN of the WAF Web ACL"
   value       = aws_wafv2_web_acl.app.arn
 }
+output "cloudfront_domain_name" {
+  description = "CloudFront distribution DNS name"
+  value       = aws_cloudfront_distribution.app.domain_name
+}
+
+output "cloudfront_https_url" {
+  description = "Public HTTPS URL for the ECS application"
+  value       = "https://${aws_cloudfront_distribution.app.domain_name}"
+}

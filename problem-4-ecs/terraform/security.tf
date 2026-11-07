@@ -1,4 +1,19 @@
-# Security group for the public Application Load Balancer
+
+# ============================================================
+# CloudFront Managed Prefix List
+# ============================================================
+
+# AWS-managed IP ranges used by CloudFront to connect to origins.
+# AWS maintains these ranges automatically.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+
+# ============================================================
+# Application Load Balancer Security Group
+# ============================================================
+
 resource "aws_security_group" "alb" {
   name        = "devops-assessment-alb-sg"
   description = "Security group for the public ALB"
@@ -9,34 +24,28 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# Allow HTTP traffic for redirect and temporary testing
+# Allow HTTP access only from CloudFront origin-facing servers.
+# HTTPS is terminated at CloudFront, so the ALB uses HTTP port 80.
 resource "aws_vpc_security_group_ingress_rule" "alb_http" {
   security_group_id = aws_security_group.alb.id
 
-  cidr_ipv4   = "0.0.0.0/0"
+  prefix_list_id = data.aws_ec2_managed_prefix_list.cloudfront.id
+
   from_port   = 80
   to_port     = 80
   ip_protocol = "tcp"
 
-  description = "Allow HTTP access"
+  description = "Allow HTTP only from CloudFront origins"
 }
 
-# Allow HTTPS traffic from the internet
-resource "aws_vpc_security_group_ingress_rule" "alb_https" {
-  security_group_id = aws_security_group.alb.id
 
-  cidr_ipv4   = "0.0.0.0/0"
-  from_port   = 443
-  to_port     = 443
-  ip_protocol = "tcp"
+# ============================================================
+# ECS Fargate Security Group
+# ============================================================
 
-  description = "Allow HTTPS access"
-}
-
-# Security group for ECS Fargate tasks
 resource "aws_security_group" "ecs" {
   name        = "devops-assessment-ecs-sg"
-  description = "Security group for private ECS tasks"
+  description = "Security group for private ECS Fargate tasks"
   vpc_id      = aws_vpc.main.id
 
   tags = {
@@ -44,7 +53,7 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# Only the ALB can reach ECS on application port 8080
+# Allow application traffic only from the ALB security group.
 resource "aws_vpc_security_group_ingress_rule" "ecs_from_alb" {
   security_group_id = aws_security_group.ecs.id
 
@@ -54,10 +63,16 @@ resource "aws_vpc_security_group_ingress_rule" "ecs_from_alb" {
   to_port     = 8080
   ip_protocol = "tcp"
 
-  description = "Allow application traffic from ALB"
+  description = "Allow application traffic from ALB on port 8080"
 }
 
-# Allow ALB to communicate with ECS tasks
+
+# ============================================================
+# ALB Outbound Rules
+# ============================================================
+
+# Allow ALB to forward traffic and perform health checks
+# against ECS Fargate tasks on port 8080.
 resource "aws_vpc_security_group_egress_rule" "alb_to_ecs" {
   security_group_id = aws_security_group.alb.id
 
@@ -67,10 +82,16 @@ resource "aws_vpc_security_group_egress_rule" "alb_to_ecs" {
   to_port     = 8080
   ip_protocol = "tcp"
 
-  description = "Allow ALB traffic to ECS"
+  description = "Allow ALB traffic to ECS on port 8080"
 }
 
-# Allow ECS tasks to access ECR, CloudWatch and external services
+
+# ============================================================
+# ECS Outbound Rules
+# ============================================================
+
+# Allow ECS tasks to access AWS services such as ECR and
+# CloudWatch Logs through the NAT Gateway.
 resource "aws_vpc_security_group_egress_rule" "ecs_https" {
   security_group_id = aws_security_group.ecs.id
 
@@ -79,10 +100,10 @@ resource "aws_vpc_security_group_egress_rule" "ecs_https" {
   to_port     = 443
   ip_protocol = "tcp"
 
-  description = "Allow outbound HTTPS through NAT"
+  description = "Allow outbound HTTPS through NAT Gateway"
 }
 
-# Allow DNS queries to the VPC resolver
+# Allow DNS queries over UDP.
 resource "aws_vpc_security_group_egress_rule" "ecs_dns_udp" {
   security_group_id = aws_security_group.ecs.id
 
@@ -94,6 +115,7 @@ resource "aws_vpc_security_group_egress_rule" "ecs_dns_udp" {
   description = "Allow outbound DNS over UDP"
 }
 
+# Allow DNS queries over TCP.
 resource "aws_vpc_security_group_egress_rule" "ecs_dns_tcp" {
   security_group_id = aws_security_group.ecs.id
 

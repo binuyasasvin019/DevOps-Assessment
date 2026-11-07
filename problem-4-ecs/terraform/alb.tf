@@ -35,15 +35,37 @@ resource "aws_lb_target_group" "app" {
     Name = "devops-assessment-tg"
   }
 }
-
-# HTTP listener for initial deployment
+# HTTP listener - reject requests by default
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.app.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "403 Forbidden"
+      status_code  = "403"
+    }
+  }
+}
+
+# Forward only requests with the correct CloudFront origin header
+resource "aws_lb_listener_rule" "cloudfront_only" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 100
+
+  action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
+  }
+
+  condition {
+    http_header {
+      http_header_name = "X-Origin-Verify"
+      values           = [var.cloudfront_origin_secret]
+    }
   }
 }

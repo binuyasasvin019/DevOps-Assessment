@@ -19,3 +19,13 @@ variable "image_tag" {
     error_message = "image_tag must be a full 40-character Git commit SHA."
   }
 }
+variable "cloudfront_origin_secret" {
+  description = "Secret header value used to authenticate CloudFront requests at the ALB"
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.cloudfront_origin_secret) >= 32
+    error_message = "The CloudFront origin secret must be at least 32 characters."
+  }
+}
