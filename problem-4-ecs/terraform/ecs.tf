@@ -111,4 +111,10 @@ resource "aws_ecs_service" "app" {
     aws_lb_listener.http,
     aws_iam_role_policy_attachment.ecs_execution
   ]
+
+  lifecycle {
+    ignore_changes = [
+      task_definition
+    ]
+  }
 }
