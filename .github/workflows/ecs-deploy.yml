@@ -1,0 +1,245 @@
+name: Deploy to ECS
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Full 40-character Git SHA image tag from ECR"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ecs-production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy existing ECR image
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: ap-southeast-2
+      ECS_CLUSTER: devops-assessment-cluster
+      ECS_SERVICE: devops-assessment-service
+      ECS_TASK_FAMILY: devops-assessment-app
+      CONTAINER_NAME: app
+      ECR_REPOSITORY: devops-assessment-app
+
+    steps:
+      - name: Validate image tag
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$IMAGE_TAG" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::Image tag must be a full 40-character Git SHA"
+            exit 1
+          fi
+
+          echo "Validated image tag: $IMAGE_TAG"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify image exists in ECR
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text
+
+          echo "ECR image verified: $IMAGE_TAG"
+
+      - name: Prepare ECS task definition
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+          echo "Retrieving current ECS service task definition..."
+
+          CURRENT_TASK_ARN=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          if [[ -z "$CURRENT_TASK_ARN" || "$CURRENT_TASK_ARN" == "None" ]]; then
+            echo "::error::Could not find the ECS service task definition"
+            exit 1
+          fi
+
+          aws ecs describe-task-definition \
+            --task-definition "$CURRENT_TASK_ARN" \
+            --query taskDefinition \
+            --output json > current-task.json
+
+          CONTAINER_COUNT=$(jq --arg container "$CONTAINER_NAME" \
+            '[.containerDefinitions[] | select(.name == $container)] | length' \
+            current-task.json)
+
+          if [[ "$CONTAINER_COUNT" -ne 1 ]]; then
+            echo "::error::Expected exactly one container named $CONTAINER_NAME, found $CONTAINER_COUNT"
+            exit 1
+          fi
+
+          jq --arg image "$IMAGE_URI" --arg container "$CONTAINER_NAME" '
+            .containerDefinitions |= map(
+              if .name == $container then
+                .image = $image
+              else
+                .
+              end
+            )
+            | del(
+                .taskDefinitionArn,
+                .revision,
+                .status,
+                .requiresAttributes,
+                .compatibilities,
+                .registeredAt,
+                .registeredBy,
+                .deregisteredAt
+              )
+          ' current-task.json > new-task.json
+
+          CONFIGURED_IMAGE=$(jq -r --arg container "$CONTAINER_NAME" \
+            '.containerDefinitions[] | select(.name == $container) | .image' \
+            new-task.json)
+
+          if [[ "$CONFIGURED_IMAGE" != "$IMAGE_URI" ]]; then
+            echo "::error::Container image verification failed"
+            exit 1
+          fi
+
+          echo "Prepared task definition with image: $IMAGE_URI"
+
+      - name: Register new ECS task definition
+        id: register
+        run: |
+          set -euo pipefail
+
+          TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task.json \
+            --query taskDefinition.taskDefinitionArn \
+            --output text)
+
+          echo "task_arn=$TASK_ARN" >> "$GITHUB_OUTPUT"
+
+          echo "Registered task definition: $TASK_ARN"
+
+      - name: Deploy image to ECS
+        env:
+          TASK_ARN: ${{ steps.register.outputs.task_arn }}
+        run: |
+          set -euo pipefail
+
+          echo "Deploying task definition: $TASK_ARN"
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$TASK_ARN" \
+            --query 'service.{Name:serviceName,Status:status,TaskDefinition:taskDefinition}' \
+            --output json
+
+      - name: Wait for ECS deployment
+        run: |
+          set -euo pipefail
+
+          echo "Waiting for ECS service to stabilize..."
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
+
+          echo "ECS service is stable."
+
+      - name: Verify deployed task definition
+        env:
+          EXPECTED_TASK_ARN: ${{ steps.register.outputs.task_arn }}
+        run: |
+          set -euo pipefail
+
+          SERVICE_JSON=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --output json)
+
+          DEPLOYED_TASK=$(echo "$SERVICE_JSON" | jq -r \
+            '.services[0].taskDefinition')
+
+          RUNNING_COUNT=$(echo "$SERVICE_JSON" | jq -r \
+            '.services[0].runningCount')
+
+          DESIRED_COUNT=$(echo "$SERVICE_JSON" | jq -r \
+            '.services[0].desiredCount')
+
+          ROLLOUT_STATE=$(echo "$SERVICE_JSON" | jq -r \
+            '.services[0].deployments[] |
+             select(.status == "PRIMARY") |
+             .rolloutState')
+
+          echo "Expected task: $EXPECTED_TASK_ARN"
+          echo "Deployed task: $DEPLOYED_TASK"
+          echo "Running tasks: $RUNNING_COUNT"
+          echo "Desired tasks: $DESIRED_COUNT"
+          echo "Rollout state: $ROLLOUT_STATE"
+
+          if [[ "$DEPLOYED_TASK" != "$EXPECTED_TASK_ARN" ]]; then
+            echo "::error::Deployment did not use the expected task definition"
+            exit 1
+          fi
+
+          if [[ "$RUNNING_COUNT" -ne "$DESIRED_COUNT" || "$DESIRED_COUNT" -lt 1 ]]; then
+            echo "::error::ECS running task count does not match desired count"
+            exit 1
+          fi
+
+          if [[ "$ROLLOUT_STATE" != "COMPLETED" ]]; then
+            echo "::error::ECS deployment rollout did not complete"
+            exit 1
+          fi
+
+          echo "ECS deployment verified successfully."
+
+      - name: Deployment summary
+        if: success()
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TASK_ARN: ${{ steps.register.outputs.task_arn }}
+        run: |
+          {
+            echo "## ECS Deployment Successful"
+            echo ""
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Cluster | $ECS_CLUSTER |"
+            echo "| Service | $ECS_SERVICE |"
+            echo "| Image tag | \`$IMAGE_TAG\` |"
+            echo "| Task definition | \`$TASK_ARN\` |"
+            echo "| Region | $AWS_REGION |"
+            echo "| Status | COMPLETED |"
+          } >> "$GITHUB_STEP_SUMMARY"
