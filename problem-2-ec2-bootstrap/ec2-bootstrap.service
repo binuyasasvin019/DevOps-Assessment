@@ -1,0 +1,16 @@
+[Unit]
+Description=EC2 Ubuntu 24.04 Bootstrap
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/ec2-bootstrap.sh
+TimeoutStartSec=0
+RemainAfterExit=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

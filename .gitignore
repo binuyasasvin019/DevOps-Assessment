@@ -1,0 +1,23 @@
+# Temporary Terraform AWS connectivity test
+/terraform/
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store

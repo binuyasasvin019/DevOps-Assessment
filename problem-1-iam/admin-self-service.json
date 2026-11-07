@@ -1,0 +1,57 @@
+
+{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AdminAccessExceptIAM",
+        "Effect": "Allow",
+        "NotAction": "iam:*",
+        "Resource": "*"
+      },
+      {
+        "Sid": "ReadOnlyIAM",
+        "Effect": "Allow",
+        "Action": [
+          "iam:Get*",
+          "iam:List*"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "ManageOwnPasswordAndAccessKeys",
+        "Effect": "Allow",
+        "Action": [
+          "iam:ChangePassword",
+          "iam:CreateAccessKey",
+          "iam:DeleteAccessKey",
+          "iam:UpdateAccessKey"
+        ],
+        "Resource": "arn:aws:iam::*:user/${aws:username}"
+      },
+      {
+        "Sid": "ManageOwnMFA",
+        "Effect": "Allow",
+        "Action": [
+          "iam:EnableMFADevice",
+          "iam:DeactivateMFADevice",
+          "iam:ResyncMFADevice"
+        ],
+        "Resource": [
+          "arn:aws:iam::*:user/${aws:username}",
+          "arn:aws:iam::*:mfa/${aws:username}"
+        ]
+      },
+      {
+        "Sid": "CreateOwnVirtualMFADevice",
+        "Effect": "Allow",
+        "Action": "iam:CreateVirtualMFADevice",
+        "Resource": "arn:aws:iam::*:mfa/${aws:username}"
+      },
+      {
+        "Sid": "DeleteOwnVirtualMFADevice",
+        "Effect": "Allow",
+        "Action": "iam:DeleteVirtualMFADevice",
+        "Resource": "arn:aws:iam::*:mfa/${aws:username}"
+      }
+    ]
+  }
