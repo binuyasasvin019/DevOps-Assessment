@@ -56,7 +56,10 @@ resource "aws_iam_role_policy" "github_ecs_deploy" {
           "ecs:UpdateService",
           "ecs:DescribeServices"
         ]
-        Resource = aws_ecs_service.app.id
+        Resource = [
+          aws_ecs_service.app.id,
+          aws_ecs_service.staging.id
+        ]
       },
       {
         Sid    = "ReadECSTaskDefinitions"

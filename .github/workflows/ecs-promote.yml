@@ -1,0 +1,350 @@
+name: Promote ECS Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Full 40-character Git SHA image tag in ECR"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ecs-production-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-2
+  ECS_CLUSTER: devops-assessment-cluster
+  ECR_REPOSITORY: devops-assessment-app
+  CONTAINER_NAME: app
+
+jobs:
+  staging:
+    name: Deploy and verify staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    outputs:
+      image_uri: ${{ steps.image.outputs.image_uri }}
+      image_digest: ${{ steps.image.outputs.image_digest }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate and resolve immutable image
+        id: image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$IMAGE_TAG" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::Expected a full 40-character Git SHA"
+            exit 1
+          fi
+
+          ACCOUNT=$(aws sts get-caller-identity \
+            --query Account --output text)
+
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::Image digest not found"
+            exit 1
+          fi
+
+          IMAGE_URI="$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY@$DIGEST"
+
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "image_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Resolved immutable image: $IMAGE_URI"
+
+      - name: Deploy image to staging
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          SERVICE=devops-assessment-staging-service
+
+          CURRENT_TASK=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          aws ecs describe-task-definition \
+            --task-definition "$CURRENT_TASK" \
+            --query taskDefinition \
+            --output json > current-task.json
+
+          jq --arg image "$IMAGE_URI" \
+             --arg container "$CONTAINER_NAME" '
+            .containerDefinitions |= map(
+              if .name == $container then
+                .image = $image
+                | del(.healthCheck)
+              else . end
+            )
+            | del(
+                .taskDefinitionArn,
+                .revision,
+                .status,
+                .requiresAttributes,
+                .compatibilities,
+                .registeredAt,
+                .registeredBy,
+                .deregisteredAt
+              )
+          ' current-task.json > new-task.json
+
+          TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task.json \
+            --query taskDefinition.taskDefinitionArn \
+            --output text)
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$TASK_ARN" \
+            --output json > staging-update.json
+
+          echo "Staging task: $TASK_ARN"
+
+          echo "$TASK_ARN" > staging-task-arn.txt
+
+      - name: Verify staging ECS deployment
+        run: |
+          set -euo pipefail
+
+          SERVICE=devops-assessment-staging-service
+          EXPECTED_TASK=$(cat staging-task-arn.txt)
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$SERVICE"
+
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$SERVICE" \
+            --output json > staging-service.json
+
+          jq -e --arg task "$EXPECTED_TASK" '
+            (.failures | length) == 0
+            and .services[0].taskDefinition == $task
+            and .services[0].runningCount == .services[0].desiredCount
+            and .services[0].desiredCount > 0
+            and (.services[0].deployments | length) == 1
+            and .services[0].deployments[0].rolloutState == "COMPLETED"
+          ' staging-service.json
+
+          echo "Staging ECS deployment verified"
+
+      - name: Verify staging ALB target health
+        run: |
+          set -euo pipefail
+
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --names devops-assessment-staging-tg \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+
+          aws elbv2 describe-target-health \
+            --target-group-arn "$TG_ARN" \
+            --output json > staging-target-health.json
+
+          jq -e '
+            (.TargetHealthDescriptions | length) > 0
+            and all(.TargetHealthDescriptions[]; .TargetHealth.State == "healthy")
+          ' staging-target-health.json
+
+          echo "Staging ALB targets are healthy"
+
+      - name: Capture staging evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-evidence-${{ github.run_id }}
+          path: |
+            staging-service.json
+            staging-target-health.json
+            staging-task-arn.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  production:
+    name: Approve and promote to production
+    needs: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify approved image digest
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          EXPECTED_DIGEST: ${{ needs.staging.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+
+          ACTUAL_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          if [[ "$ACTUAL_DIGEST" != "$EXPECTED_DIGEST" ]]; then
+            echo "::error::Image digest changed after staging verification"
+            exit 1
+          fi
+
+          echo "Approved image digest verified: $ACTUAL_DIGEST"
+
+      - name: Deploy approved image to production
+        id: deploy
+        env:
+          IMAGE_URI: ${{ needs.staging.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          SERVICE=devops-assessment-service
+
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$SERVICE" \
+            --output json > production-before.json
+
+          jq -e '
+            (.failures | length) == 0
+            and .services[0].runningCount == .services[0].desiredCount
+            and .services[0].desiredCount > 0
+            and (.services[0].deployments | length) == 1
+            and .services[0].deployments[0].rolloutState == "COMPLETED"
+            and .services[0].deploymentConfiguration.deploymentCircuitBreaker.enable == true
+            and .services[0].deploymentConfiguration.deploymentCircuitBreaker.rollback == true
+          ' production-before.json
+
+          PREVIOUS_TASK=$(jq -r \
+            '.services[0].taskDefinition' production-before.json)
+
+          echo "previous_task=$PREVIOUS_TASK" >> "$GITHUB_OUTPUT"
+
+          aws ecs describe-task-definition \
+            --task-definition "$PREVIOUS_TASK" \
+            --query taskDefinition \
+            --output json > current-production-task.json
+
+          jq --arg image "$IMAGE_URI" \
+             --arg container "$CONTAINER_NAME" '
+            .containerDefinitions |= map(
+              if .name == $container then
+                .image = $image
+                | del(.healthCheck)
+              else . end
+            )
+            | del(
+                .taskDefinitionArn,
+                .revision,
+                .status,
+                .requiresAttributes,
+                .compatibilities,
+                .registeredAt,
+                .registeredBy,
+                .deregisteredAt
+              )
+          ' current-production-task.json > new-production-task.json
+
+          TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-production-task.json \
+            --query taskDefinition.taskDefinitionArn \
+            --output text)
+
+          echo "task_arn=$TASK_ARN" >> "$GITHUB_OUTPUT"
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$TASK_ARN" \
+            --output json > production-update.json
+
+          echo "Production deployment initiated: $TASK_ARN"
+
+      - name: Verify production deployment
+        env:
+          EXPECTED_TASK: ${{ steps.deploy.outputs.task_arn }}
+        run: |
+          set -euo pipefail
+
+          SERVICE=devops-assessment-service
+
+          if ! aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$SERVICE"; then
+            echo "::error::Production did not stabilize within waiter limits"
+            exit 1
+          fi
+
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$SERVICE" \
+            --output json > production-after.json
+
+          jq -e --arg task "$EXPECTED_TASK" '
+            (.failures | length) == 0
+            and .services[0].taskDefinition == $task
+            and .services[0].runningCount == .services[0].desiredCount
+            and .services[0].desiredCount > 0
+            and (.services[0].deployments | length) == 1
+            and .services[0].deployments[0].rolloutState == "COMPLETED"
+          ' production-after.json
+
+          echo "Production deployment successful"
+
+      - name: Verify production image digest
+        env:
+          EXPECTED_DIGEST: ${{ needs.staging.outputs.image_digest }}
+          EXPECTED_TASK: ${{ steps.deploy.outputs.task_arn }}
+        run: |
+          set -euo pipefail
+
+          IMAGE=$(aws ecs describe-task-definition \
+            --task-definition "$EXPECTED_TASK" \
+            --query 'taskDefinition.containerDefinitions[0].image' \
+            --output text)
+
+          if [[ "$IMAGE" != *"@$EXPECTED_DIGEST" ]]; then
+            echo "::error::Production task image digest mismatch"
+            exit 1
+          fi
+
+          echo "Production uses the exact staging-approved image: $IMAGE"
+
+      - name: Capture production evidence
+        if: always() && steps.deploy.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-evidence-${{ github.run_id }}
+          path: |
+            production-before.json
+            production-update.json
+            production-after.json
+          if-no-files-found: warn
+          retention-days: 7
