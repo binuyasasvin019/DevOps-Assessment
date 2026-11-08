@@ -1,3 +1,4 @@
+
 name: Deploy to ECS
 
 on:
@@ -7,6 +8,11 @@ on:
         description: "Full 40-character Git SHA image tag from ECR"
         required: true
         type: string
+      rollback_test:
+        description: "Test ECS automatic rollback with an unhealthy container"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   id-token: write
@@ -20,6 +26,7 @@ jobs:
   deploy:
     name: Deploy existing ECR image
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     env:
       AWS_REGION: ap-southeast-2
@@ -28,6 +35,7 @@ jobs:
       ECS_TASK_FAMILY: devops-assessment-app
       CONTAINER_NAME: app
       ECR_REPOSITORY: devops-assessment-app
+      ROLLBACK_TEST: ${{ inputs.rollback_test }}
 
     steps:
       - name: Validate image tag
@@ -55,41 +63,77 @@ jobs:
         run: |
           set -euo pipefail
 
-          aws ecr describe-images \
+          IMAGE_DIGEST=$(aws ecr describe-images \
             --repository-name "$ECR_REPOSITORY" \
             --image-ids imageTag="$IMAGE_TAG" \
-            --region "$AWS_REGION" \
             --query 'imageDetails[0].imageDigest' \
-            --output text
+            --output text)
 
-          echo "ECR image verified: $IMAGE_TAG"
+          if [[ "$IMAGE_DIGEST" != sha256:* ]]; then
+            echo "::error::ECR image digest not found"
+            exit 1
+          fi
+
+          echo "Verified ECR image: $IMAGE_TAG"
+          echo "Image digest: $IMAGE_DIGEST"
 
       - name: Prepare ECS task definition
+        id: prepare
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
 
           ACCOUNT_ID=$(aws sts get-caller-identity \
-            --query Account \
-            --output text)
+            --query Account --output text)
 
           IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
-
-          echo "Retrieving current ECS service task definition..."
-
-          CURRENT_TASK_ARN=$(aws ecs describe-services \
+          SERVICE_JSON=$(aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_SERVICE" \
-            --query 'services[0].taskDefinition' \
-            --output text)
+            --output json)
 
-          if [[ -z "$CURRENT_TASK_ARN" || "$CURRENT_TASK_ARN" == "None" ]]; then
-            echo "::error::Could not find the ECS service task definition"
+          if [[ $(jq '.failures | length' <<< "$SERVICE_JSON") -ne 0 ]]; then
+            echo "::error::ECS service not found"
             exit 1
           fi
+
+          CURRENT_TASK_ARN=$(jq -r \
+            '.services[0].taskDefinition // empty' <<< "$SERVICE_JSON")
+
+          CURRENT_STATE=$(jq -r \
+            '[.services[0].deployments[] |
+              select(.status == "PRIMARY")][0].rolloutState // empty' \
+            <<< "$SERVICE_JSON")
+
+          RUNNING=$(jq -r '.services[0].runningCount' <<< "$SERVICE_JSON")
+          DESIRED=$(jq -r '.services[0].desiredCount' <<< "$SERVICE_JSON")
+          DEPLOYMENT_COUNT=$(jq '.services[0].deployments | length' <<< "$SERVICE_JSON")
+
+          if [[ -z "$CURRENT_TASK_ARN" ||
+                "$CURRENT_STATE" != "COMPLETED" ||
+                "$RUNNING" -ne "$DESIRED" ||
+                "$DESIRED" -lt 1 ||
+                "$DEPLOYMENT_COUNT" -ne 1 ]]; then
+            echo "::error::ECS service must be stable before deployment"
+            exit 1
+          fi
+
+          if [[ "$ROLLBACK_TEST" == "true" ]]; then
+            BREAKER=$(jq -r \
+              '.services[0].deploymentConfiguration.deploymentCircuitBreaker |
+               (.enable == true and .rollback == true)' \
+              <<< "$SERVICE_JSON")
+
+            if [[ "$BREAKER" != "true" ]]; then
+              echo "::error::ECS circuit breaker and rollback must be enabled"
+              exit 1
+            fi
+          fi
+
+          echo "previous_task_arn=$CURRENT_TASK_ARN" >> "$GITHUB_OUTPUT"
+          echo "Previous healthy task: $CURRENT_TASK_ARN"
 
           aws ecs describe-task-definition \
             --task-definition "$CURRENT_TASK_ARN" \
@@ -97,36 +141,52 @@ jobs:
             --output json > current-task.json
 
           CONTAINER_COUNT=$(jq --arg container "$CONTAINER_NAME" \
-            '[.containerDefinitions[] | select(.name == $container)] | length' \
+            '[.containerDefinitions[] |
+              select(.name == $container)] | length' \
             current-task.json)
 
           if [[ "$CONTAINER_COUNT" -ne 1 ]]; then
-            echo "::error::Expected exactly one container named $CONTAINER_NAME, found $CONTAINER_COUNT"
+            echo "::error::Expected exactly one application container"
             exit 1
           fi
 
-          jq --arg image "$IMAGE_URI" --arg container "$CONTAINER_NAME" '
-            .containerDefinitions |= map(
-              if .name == $container then
-                .image = $image
-              else
-                .
-              end
-            )
-            | del(
-                .taskDefinitionArn,
-                .revision,
-                .status,
-                .requiresAttributes,
-                .compatibilities,
-                .registeredAt,
-                .registeredBy,
-                .deregisteredAt
+          jq \
+            --arg image "$IMAGE_URI" \
+            --arg container "$CONTAINER_NAME" \
+            --arg rollback_test "$ROLLBACK_TEST" '
+              .containerDefinitions |= map(
+                if .name == $container then
+                  .image = $image
+                  | if $rollback_test == "true" then
+                      .healthCheck = {
+                        command: ["CMD-SHELL", "exit 1"],
+                        interval: 10,
+                        timeout: 5,
+                        retries: 2,
+                        startPeriod: 0
+                      }
+                    else
+                      .
+                    end
+                else
+                  .
+                end
               )
-          ' current-task.json > new-task.json
+              | del(
+                  .taskDefinitionArn,
+                  .revision,
+                  .status,
+                  .requiresAttributes,
+                  .compatibilities,
+                  .registeredAt,
+                  .registeredBy,
+                  .deregisteredAt
+                )
+            ' current-task.json > new-task.json
 
           CONFIGURED_IMAGE=$(jq -r --arg container "$CONTAINER_NAME" \
-            '.containerDefinitions[] | select(.name == $container) | .image' \
+            '.containerDefinitions[] |
+             select(.name == $container) | .image' \
             new-task.json)
 
           if [[ "$CONFIGURED_IMAGE" != "$IMAGE_URI" ]]; then
@@ -134,7 +194,8 @@ jobs:
             exit 1
           fi
 
-          echo "Prepared task definition with image: $IMAGE_URI"
+          echo "Prepared task definition: $IMAGE_URI"
+          echo "Rollback test enabled: $ROLLBACK_TEST"
 
       - name: Register new ECS task definition
         id: register
@@ -147,99 +208,242 @@ jobs:
             --output text)
 
           echo "task_arn=$TASK_ARN" >> "$GITHUB_OUTPUT"
-
           echo "Registered task definition: $TASK_ARN"
 
       - name: Deploy image to ECS
+        id: deploy
         env:
           TASK_ARN: ${{ steps.register.outputs.task_arn }}
         run: |
           set -euo pipefail
-
-          echo "Deploying task definition: $TASK_ARN"
 
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
             --service "$ECS_SERVICE" \
             --task-definition "$TASK_ARN" \
-            --query 'service.{Name:serviceName,Status:status,TaskDefinition:taskDefinition}' \
+            --query 'service.{Name:serviceName,TaskDefinition:taskDefinition,Status:status}' \
             --output json
 
-      - name: Wait for ECS deployment
-        run: |
-          set -euo pipefail
-
-          echo "Waiting for ECS service to stabilize..."
-
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE"
-
-          echo "ECS service is stable."
-
-      - name: Verify deployed task definition
+      - name: Monitor deployment and automatic rollback
+        id: monitor
         env:
           EXPECTED_TASK_ARN: ${{ steps.register.outputs.task_arn }}
+          PREVIOUS_TASK_ARN: ${{ steps.prepare.outputs.previous_task_arn }}
         run: |
           set -euo pipefail
 
-          SERVICE_JSON=$(aws ecs describe-services \
+          MAX_ATTEMPTS=140
+          RESULT="TIMEOUT"
+          FAILED_DEPLOYMENT_SEEN=false
+          FAILURE_EVENT_SEEN=false
+          ROLLBACK_EVENT_SEEN=false
+          ATTEMPT_SEEN=false
+
+          : > deployment-events.log
+
+          echo "Attempted task: $EXPECTED_TASK_ARN"
+          echo "Previous healthy task: $PREVIOUS_TASK_ARN"
+          echo "Rollback test: $ROLLBACK_TEST"
+
+          for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
+
+            SERVICE_JSON=$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" \
+              --services "$ECS_SERVICE" \
+              --output json)
+
+            DEPLOYED_TASK=$(jq -r \
+              '.services[0].taskDefinition' <<< "$SERVICE_JSON")
+
+            RUNNING=$(jq -r \
+              '.services[0].runningCount' <<< "$SERVICE_JSON")
+
+            DESIRED=$(jq -r \
+              '.services[0].desiredCount' <<< "$SERVICE_JSON")
+
+            PRIMARY_STATE=$(jq -r \
+              '[.services[0].deployments[] |
+                select(.status == "PRIMARY")][0].rolloutState // "UNKNOWN"' \
+              <<< "$SERVICE_JSON")
+
+            ATTEMPTED_STATE=$(jq -r --arg arn "$EXPECTED_TASK_ARN" \
+              '[.services[0].deployments[] |
+                select(.taskDefinition == $arn)][0].rolloutState // "NOT_PRESENT"' \
+              <<< "$SERVICE_JSON")
+
+            DEPLOYMENT_COUNT=$(jq -r \
+              '.services[0].deployments | length' <<< "$SERVICE_JSON")
+
+            EVENTS=$(jq -r \
+              '.services[0].events[0:50][]? |
+               "\(.createdAt) | \(.message)"' \
+              <<< "$SERVICE_JSON")
+
+            printf '%s\n' "$EVENTS" >> deployment-events.log
+
+            if [[ "$ATTEMPTED_STATE" != "NOT_PRESENT" ]]; then
+              ATTEMPT_SEEN=true
+            fi
+
+            if [[ "$ATTEMPTED_STATE" == "FAILED" ]]; then
+              FAILED_DEPLOYMENT_SEEN=true
+            fi
+
+            # Only inspect events captured after this workflow
+            # initiated the deployment. Match failure and rollback
+            # messages separately.
+            if grep -Eiq 'deployment .* failed|deployment circuit breaker' \
+              <<< "$EVENTS"; then
+              FAILURE_EVENT_SEEN=true
+            fi
+
+            if grep -Eiq 'rolling back|rollback' <<< "$EVENTS"; then
+              ROLLBACK_EVENT_SEEN=true
+            fi
+
+            echo "Attempt $attempt/$MAX_ATTEMPTS"
+            echo "  Service task: $DEPLOYED_TASK"
+            echo "  Attempted state: $ATTEMPTED_STATE"
+            echo "  Primary state: $PRIMARY_STATE"
+            echo "  Running/desired: $RUNNING/$DESIRED"
+            echo "  Failed deployment observed: $FAILED_DEPLOYMENT_SEEN"
+            echo "  Failure event observed: $FAILURE_EVENT_SEEN"
+            echo "  Rollback event observed: $ROLLBACK_EVENT_SEEN"
+
+            if [[ "$ROLLBACK_TEST" == "false" ]]; then
+
+              if [[ "$DEPLOYED_TASK" == "$EXPECTED_TASK_ARN" &&
+                    "$PRIMARY_STATE" == "COMPLETED" &&
+                    "$RUNNING" -eq "$DESIRED" &&
+                    "$DESIRED" -gt 0 &&
+                    "$DEPLOYMENT_COUNT" -eq 1 ]]; then
+                RESULT="SUCCESS"
+                break
+              fi
+
+              if [[ "$ATTEMPTED_STATE" == "FAILED" ]]; then
+                RESULT="DEPLOYMENT_FAILED"
+                break
+              fi
+
+              if [[ "$DEPLOYED_TASK" == "$PREVIOUS_TASK_ARN" &&
+                    "$PRIMARY_STATE" == "COMPLETED" &&
+                    "$ROLLBACK_EVENT_SEEN" == "true" ]]; then
+                RESULT="ROLLED_BACK"
+                break
+              fi
+
+            else
+
+              if [[ "$DEPLOYED_TASK" == "$EXPECTED_TASK_ARN" &&
+                    "$PRIMARY_STATE" == "COMPLETED" &&
+                    "$RUNNING" -eq "$DESIRED" &&
+                    "$DESIRED" -gt 0 &&
+                    "$DEPLOYMENT_COUNT" -eq 1 ]]; then
+                RESULT="UNEXPECTED_SUCCESS"
+                break
+              fi
+
+              if [[ "$DEPLOYED_TASK" == "$PREVIOUS_TASK_ARN" &&
+                    "$PRIMARY_STATE" == "COMPLETED" &&
+                    "$RUNNING" -eq "$DESIRED" &&
+                    "$DESIRED" -gt 0 &&
+                    "$DEPLOYMENT_COUNT" -eq 1 &&
+                    "$ATTEMPT_SEEN" == "true" &&
+                    "$ROLLBACK_EVENT_SEEN" == "true" &&
+                    ( "$FAILED_DEPLOYMENT_SEEN" == "true" ||
+                      "$FAILURE_EVENT_SEEN" == "true" ) ]]; then
+                RESULT="ROLLBACK_VERIFIED"
+                break
+              fi
+
+            fi
+
+            sleep 15
+          done
+
+          {
+            echo "result=$RESULT"
+            echo "failed_deployment_seen=$FAILED_DEPLOYMENT_SEEN"
+            echo "failure_event_seen=$FAILURE_EVENT_SEEN"
+            echo "rollback_event_seen=$ROLLBACK_EVENT_SEEN"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Final monitoring result: $RESULT"
+
+          if [[ "$ROLLBACK_TEST" == "true" ]]; then
+            if [[ "$RESULT" != "ROLLBACK_VERIFIED" ]]; then
+              echo "::error::Automatic ECS rollback was not verified: $RESULT"
+              exit 1
+            fi
+          else
+            if [[ "$RESULT" != "SUCCESS" ]]; then
+              echo "::error::ECS deployment did not succeed: $RESULT"
+              exit 1
+            fi
+          fi
+
+      - name: Capture ECS deployment evidence
+        if: always() && steps.deploy.outcome == 'success'
+        env:
+          EXPECTED_TASK_ARN: ${{ steps.register.outputs.task_arn }}
+          PREVIOUS_TASK_ARN: ${{ steps.prepare.outputs.previous_task_arn }}
+          MONITOR_RESULT: ${{ steps.monitor.outputs.result }}
+        run: |
+          set -euo pipefail
+
+          aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$ECS_SERVICE" \
-            --output json)
+            --output json > ecs-deployment-evidence.json
 
-          DEPLOYED_TASK=$(echo "$SERVICE_JSON" | jq -r \
-            '.services[0].taskDefinition')
+          DEPLOYED_TASK=$(jq -r \
+            '.services[0].taskDefinition' ecs-deployment-evidence.json)
 
-          RUNNING_COUNT=$(echo "$SERVICE_JSON" | jq -r \
-            '.services[0].runningCount')
+          PRIMARY_STATE=$(jq -r \
+            '[.services[0].deployments[] |
+              select(.status == "PRIMARY")][0].rolloutState // "UNKNOWN"' \
+            ecs-deployment-evidence.json)
 
-          DESIRED_COUNT=$(echo "$SERVICE_JSON" | jq -r \
-            '.services[0].desiredCount')
+          RUNNING=$(jq -r \
+            '.services[0].runningCount' ecs-deployment-evidence.json)
 
-          ROLLOUT_STATE=$(echo "$SERVICE_JSON" | jq -r \
-            '.services[0].deployments[] |
-             select(.status == "PRIMARY") |
-             .rolloutState')
+          DESIRED=$(jq -r \
+            '.services[0].desiredCount' ecs-deployment-evidence.json)
 
-          echo "Expected task: $EXPECTED_TASK_ARN"
-          echo "Deployed task: $DEPLOYED_TASK"
-          echo "Running tasks: $RUNNING_COUNT"
-          echo "Desired tasks: $DESIRED_COUNT"
-          echo "Rollout state: $ROLLOUT_STATE"
-
-          if [[ "$DEPLOYED_TASK" != "$EXPECTED_TASK_ARN" ]]; then
-            echo "::error::Deployment did not use the expected task definition"
-            exit 1
-          fi
-
-          if [[ "$RUNNING_COUNT" -ne "$DESIRED_COUNT" || "$DESIRED_COUNT" -lt 1 ]]; then
-            echo "::error::ECS running task count does not match desired count"
-            exit 1
-          fi
-
-          if [[ "$ROLLOUT_STATE" != "COMPLETED" ]]; then
-            echo "::error::ECS deployment rollout did not complete"
-            exit 1
-          fi
-
-          echo "ECS deployment verified successfully."
-
-      - name: Deployment summary
-        if: success()
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          TASK_ARN: ${{ steps.register.outputs.task_arn }}
-        run: |
           {
-            echo "## ECS Deployment Successful"
+            echo "## ECS Deployment Evidence"
             echo ""
             echo "| Property | Value |"
             echo "|---|---|"
             echo "| Cluster | $ECS_CLUSTER |"
             echo "| Service | $ECS_SERVICE |"
-            echo "| Image tag | \`$IMAGE_TAG\` |"
-            echo "| Task definition | \`$TASK_ARN\` |"
-            echo "| Region | $AWS_REGION |"
-            echo "| Status | COMPLETED |"
+            echo "| Rollback test | $ROLLBACK_TEST |"
+            echo "| Attempted task definition | \`$EXPECTED_TASK_ARN\` |"
+            echo "| Previous healthy task definition | \`$PREVIOUS_TASK_ARN\` |"
+            echo "| Final task definition | \`$DEPLOYED_TASK\` |"
+            echo "| Final rollout state | $PRIMARY_STATE |"
+            echo "| Running / desired | $RUNNING / $DESIRED |"
+            echo "| Monitor result | $MONITOR_RESULT |"
+            echo ""
+            echo "### Captured deployment events"
+            echo ""
+            echo '```text'
+            if [[ -f deployment-events.log ]]; then
+              sort -u deployment-events.log | tail -60
+            else
+              echo "No monitoring events captured."
+            fi
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload deployment evidence
+        if: always() && steps.deploy.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecs-deployment-evidence-${{ github.run_id }}
+          path: |
+            ecs-deployment-evidence.json
+            deployment-events.log
+          retention-days: 7
+          if-no-files-found: warn
