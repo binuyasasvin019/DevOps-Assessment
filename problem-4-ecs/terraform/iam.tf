@@ -83,6 +83,17 @@ resource "aws_iam_role_policy" "github_ecs_deploy" {
       },
 
       {
+        Sid    = "ReadECSTasks"
+        Effect = "Allow"
+
+        Action = [
+          "ecs:ListTasks",
+          "ecs:DescribeTasks"
+        ]
+
+        Resource = "*"
+      },
+      {
         Sid    = "PassECSTaskRoles"
         Effect = "Allow"
         Action = [
