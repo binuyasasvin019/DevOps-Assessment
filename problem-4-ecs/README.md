@@ -280,4 +280,4 @@ The repository currently provisions **one ECS service**. A production-ready exte
 
 ## AI assistance disclosure
 
-AI assistance was used to explain AWS and Terraform configuration, troubleshoot IAM/OIDC/ECS/ALB/Cloud-front/Docker application and CI/CD Implementations & errors, structure the infrastructure diagrams and draft documentation.
+AI assistance was used to explain AWS and Terraform configuration, troubleshoot IAM/OIDC/ECS/ALB/Cloud-front/Docker application and CI/CD Implementations & errors and draft documentation.
