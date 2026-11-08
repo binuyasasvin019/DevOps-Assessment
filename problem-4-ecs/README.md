@@ -190,20 +190,182 @@ The S3 bucket must already exist. Native S3 state locking uses a lockfile, so a 
 
 See the [![ECS infrastructure architecture](diagrams/ecs-infrastructure.png). It covers CloudFront, WAF, ALB, VPC, subnets, route tables, NACLs, NAT, ECS, ECR, CloudWatch, IAM, GitHub Actions and the S3 Terraform backend.
 
-## Part 5 — Continuous deployment (CD)
 
-The workflow at `.github/workflows/ecs-deploy.yml` allows manual selection of an **existing full 40-character SHA image tag**.
+## Part 5 — Continuous Deployment (CD)
 
-Deployment steps:
+### Overview
 
-1. Validate the requested tag.
-2. Authenticate to AWS using GitHub OIDC.
-3. Verify the image exists in ECR.
-4. Retrieve the current ECS service task definition.
-5. Create and register a new task definition revision using the selected ECR image.
-6. Update the ECS service.
-7. Wait for ECS service stabilization.
-8. Verify the requested task definition is deployed, running count equals desired count, and rollout state is `COMPLETED`.
+Two GitHub Actions workflows implement ECS deployment and release management:
+
+- `.github/workflows/ecs-deploy.yml` — Deploy an existing ECR image to production, monitor the deployment, and verify automatic rollback.
+- `.github/workflows/ecs-promote.yml` — Deploy an immutable image to staging, verify its health, obtain production approval, and promote the exact same image digest to production.
+
+Both workflows authenticate to AWS using GitHub OIDC and short-lived IAM role credentials.
+
+### 5.1 Deploy an Existing ECR Image
+
+The deployment workflow accepts a full 40-character Git commit SHA as its image tag.
+
+The workflow:
+
+1. Validates the selected image tag.
+2. Authenticates to AWS using OIDC.
+3. Verifies that the image exists in Amazon ECR.
+4. Retrieves the current ECS task definition.
+5. Registers a new task definition revision.
+6. Updates the ECS service.
+7. Monitors deployment status and task health.
+8. Verifies the final deployment or detects rollback.
+9. Uploads deployment evidence.
+
+The ECS service uses the deployment circuit breaker with automatic rollback enabled.
+
+### 5.2 Automatic Rollback — Successfully Verified
+
+A controlled failure test was performed by deploying a task definition with an intentionally failing container health check.
+
+The ECS deployment circuit breaker detected the unhealthy deployment and automatically restored the previous healthy task definition.
+
+| Property | Verified Result |
+|---|---|
+| ECS cluster | `devops-assessment-cluster` |
+| Production service | `devops-assessment-service` |
+| Rollback test | `true` |
+| Attempted task definition | `devops-assessment-app:4` |
+| Previous healthy task definition | `devops-assessment-app:2` |
+| Final task definition | `devops-assessment-app:2` |
+| Final rollout state | `COMPLETED` |
+| Running / desired tasks | `1 / 1` |
+| Workflow monitor result | `ROLLBACK_VERIFIED` |
+
+**Rollback evidence:**
+
+![Successful automatic rollback verification](screenshots/git-hub-actions-rollback.png)
+
+[View rollback verification artifact](https://github.com/binuyasasvin019/DevOps-Assessment/actions/runs/42460763961/artifacts/13609853266)
+
+This demonstrates that an unhealthy deployment does not permanently replace the last successfully deployed application revision.
+
+### 5.3 Staging and Production Environments
+
+Separate staging and production ECS services were provisioned using Terraform.
+
+Both services run in the same ECS cluster but have independent task definitions and ALB target groups.
+
+| Component | Staging | Production |
+|---|---|---|
+| ECS cluster | `devops-assessment-cluster` | `devops-assessment-cluster` |
+| ECS service | `devops-assessment-staging-service` | `devops-assessment-service` |
+| Task definition family | `devops-assessment-staging` | `devops-assessment-app` |
+| ALB target group | `devops-assessment-staging-tg` | `devops-assessment-tg` |
+| Compute | AWS Fargate | AWS Fargate |
+| Desired tasks | 1 | 1 |
+| Image repository | Shared Amazon ECR repository | Shared Amazon ECR repository |
+
+Both services use ECS deployment circuit breakers with automatic rollback enabled.
+
+**AWS ECS cluster showing staging and production services:**
+
+![ECS staging and production services](screenshots/ecs-clusters-stg&prod(1).png)
+
+### 5.4 Staging-to-Production Image Promotion
+
+The GitHub Actions workflow `.github/workflows/ecs-promote.yml` implements controlled promotion.
+
+**Staging deployment:**
+
+1. Accept a full Git commit SHA.
+2. Resolve the corresponding immutable ECR image digest.
+3. Register a new staging task definition referencing the image digest.
+4. Deploy the task definition to the staging ECS service.
+5. Wait for ECS deployment stabilization.
+6. Verify the expected task definition, desired task count, and `COMPLETED` rollout state.
+7. Verify the active staging task is healthy in the ALB target group.
+8. Upload staging deployment evidence.
+
+**Production promotion:**
+
+1. Require approval through the GitHub `production` environment.
+2. Authenticate to AWS using OIDC.
+3. Recheck the approved ECR image digest.
+4. Verify that the current production ECS deployment is healthy.
+5. Register a production task definition using the exact staging-approved image digest.
+6. Update the production ECS service.
+7. Wait for deployment stabilization.
+8. Verify the production task definition and rollout state.
+9. Confirm production references the exact approved image digest.
+10. Upload production deployment evidence.
+
+The image is **not rebuilt between staging and production**, ensuring artifact consistency.
+
+### 5.5 Successful Production Promotion — 8 November 2026
+
+The staging-to-production promotion workflow completed successfully.
+
+| Property | Verified Result |
+|---|---|
+| AWS region | `ap-southeast-2` |
+| ECS cluster | `devops-assessment-cluster` |
+| Staging deployment | Successful |
+| Staging ALB health verification | Successful |
+| Production approval | Configured through GitHub environment |
+| Production deployment | Successful |
+| Production task definition | `devops-assessment-app:5` |
+| Production rollout state | `COMPLETED` |
+| Image digest verification | Successful |
+
+**Promoted image tag:**
+
+`2aead8cc993018c780e5e64adcf00499054f304a`
+
+**Verified image digest:**
+
+`sha256:aa76dbbfb8fed50a6097901ddb1be571902fe8f2b0e34549773cc0dc2f65962f`
+
+**Successful GitHub Actions promotion:**
+
+![Successful staging-to-production promotion](screenshots/build-image-promotion-to -prod(1).png)
+
+[View successful promotion workflow](https://github.com/binuyasasvin019/DevOps-Assessment/actions/runs/42477999539)
+
+[View production deployment evidence artifact](https://github.com/binuyasasvin019/DevOps-Assessment/actions/runs/42477999539/artifacts/13616951378)
+
+### 5.6 IAM and Deployment Security
+
+GitHub Actions assumes the `DevOpsAssessmentGitHubECRRole` IAM role using OIDC.
+
+The role's permissions were extended to support deployment verification:
+
+- `ecs:RegisterTaskDefinition`
+- `ecs:DescribeTaskDefinition`
+- `ecs:UpdateService`
+- `ecs:DescribeServices`
+- `ecs:ListTasks`
+- `ecs:DescribeTasks`
+- `elasticloadbalancing:DescribeTargetGroups`
+- `elasticloadbalancing:DescribeTargetHealth`
+- `iam:PassRole`, restricted to the ECS execution and task roles
+- Required Amazon ECR image operations
+
+The IAM trust relationship allows the repository's authorized main-branch workflow context and the GitHub `production` environment context.
+
+The production environment provides a manual approval gate before promotion.
+
+No long-lived AWS access keys are stored in GitHub Actions.
+
+### 5.7 Deployment Reliability
+
+The deployment solution implements:
+
+- Immutable ECR image references using SHA256 digests.
+- Separate staging and production ECS services.
+- ECS and ALB health verification.
+- GitHub environment approval before production promotion.
+- ECS deployment circuit breakers with automatic rollback.
+- Workflow failure detection and deployment evidence collection.
+- GitHub Actions concurrency control to avoid overlapping production deployments.
+
+**Result:** The ECS continuous deployment solution was successfully implemented and tested, including automatic rollback and controlled staging-to-production image promotion.
 
 ### Observed successful deployment
 
