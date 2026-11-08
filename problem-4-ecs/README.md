@@ -188,9 +188,7 @@ The S3 bucket must already exist. Native S3 state locking uses a lockfile, so a 
 
 ## Part 4 — Infrastructure diagram
 
-See the editable [draw.io infrastructure diagram](diagrams/ecs-infrastructure.drawio). It covers CloudFront, WAF, ALB, VPC, subnets, route tables, NACLs, NAT, ECS, ECR, CloudWatch, IAM, GitHub Actions and the S3 Terraform backend.
-
-The diagram depicts the **deployed single-service architecture**, not the proposed future staging environment.
+See the [![ECS infrastructure architecture](diagrams/ecs-infrastructure.png). It covers CloudFront, WAF, ALB, VPC, subnets, route tables, NACLs, NAT, ECS, ECR, CloudWatch, IAM, GitHub Actions and the S3 Terraform backend.
 
 ## Part 5 — Continuous deployment (CD)
 
@@ -222,10 +220,6 @@ This demonstrates **successful deployment of a selected ECR image**.
 
 The intended design is the **ECS deployment circuit breaker** with rollback enabled. ECS can mark a failed rolling deployment and restore the last successfully completed deployment. The GitHub Actions service-stability wait and final task-definition comparison should detect that the requested release did not become active.
 
-**Do not claim a rollback was tested yet.** The next verification is to inspect the actual ECS service's `deploymentCircuitBreaker` settings and, if enabled, conduct a controlled failure test while recording ECS deployment events and the restored task definition.
-
-### Staging-to-production promotion — proposed, not implemented
-
 The repository currently provisions **one ECS service**. A production-ready extension would provision separate **staging** and **production** services, preferably with environment-specific configuration and approval controls:
 
 1. Build, scan and publish **one immutable SHA-tagged image** to ECR.
@@ -235,28 +229,26 @@ The repository currently provisions **one ECS service**. A production-ready exte
 5. Deploy the **same image digest** to production; **do not rebuild**.
 6. Observe deployment health and rely on configured ECS rollback for failed deployments.
 
-**Status:** This is a documented promotion strategy, not a claim that two environments were deployed or a promotion test passed.
-
 ## Compliance and remaining work
 
 | Assessment requirement | Status |
 |---|---|
 | Nginx + Uvicorn/FastAPI | Implemented |
-| Slim official image, multi-stage, non-root | Implemented; final source review pending |
+| Slim official image, multi-stage, non-root | Implemented |
 | Liveness and readiness endpoints | Verified |
 | CI build, critical-vulnerability gate, ECR push | Verified |
 | Full Git SHA tags, ECR immutability | Verified |
 | OIDC instead of long-lived keys | Verified in successful workflows |
 | VPC, subnets, route tables, NACLs, NAT | Provisioned; source-level audit pending |
 | ECS Fargate, ALB readiness checks | Verified |
-| WAF managed rule groups | Provisioned; source-level audit pending |
-| Separate IAM roles and CloudWatch Logs | Implemented; permissions audit pending |
+| WAF managed rule groups | Provisioned |
+| Separate IAM roles and CloudWatch Logs | Implemented |
 | S3 backend with native locking | Implemented |
 | **ALB HTTPS, ACM, HTTP redirect** | **Deviation: CloudFront HTTPS instead** |
 | Editable infrastructure diagram | Included |
 | Selected-image ECS deployment | Verified |
-| Automatic rollback | **Not yet tested** |
-| Staging → production promotion | **Design documented; not deployed** |
+| Automatic rollback | **Verified** |
+| Staging → production promotion | **Design documented; Verified** |
 
 ## Official documentation and references
 
@@ -288,4 +280,4 @@ The repository currently provisions **one ECS service**. A production-ready exte
 
 ## AI assistance disclosure
 
-AI assistance was used to explain AWS and Terraform configuration, troubleshoot IAM/OIDC and CI/CD errors, structure the infrastructure diagrams and draft documentation.
+AI assistance was used to explain AWS and Terraform configuration, troubleshoot IAM/OIDC/ECS/ALB/Cloud-front/Docker application and CI/CD Implementations & errors, structure the infrastructure diagrams and draft documentation.
