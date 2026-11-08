@@ -69,6 +69,19 @@ resource "aws_iam_role_policy" "github_ecs_deploy" {
         ]
         Resource = "*"
       },
+
+      {
+        Sid    = "ReadALBTargetHealth"
+        Effect = "Allow"
+
+        Action = [
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetHealth"
+        ]
+
+        Resource = "*"
+      },
+
       {
         Sid    = "PassECSTaskRoles"
         Effect = "Allow"
