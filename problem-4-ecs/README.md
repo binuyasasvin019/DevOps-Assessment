@@ -1,6 +1,6 @@
 # Problem 4 — Containerise and Deploy to Amazon ECS
 
-> **Assessment status:** Working container, CI and ECS deployment demonstrated. This document records the actual deployed design, validation screenshots, trade-offs and items still requiring verification. It does **not** claim that automatic rollback or staging-to-production promotion have been tested.
+> **Assessment status:** Working container, CI and ECS deployment demonstrated. This document records the actual deployed design, validation screenshots, trade-offs and items still requiring verification.
 
 ## Overview
 
@@ -20,7 +20,8 @@ A sample **FastAPI** application runs behind **Nginx**, with **Uvicorn** as the 
 
 ## Infrastructure diagram
 
-The **editable diagrams.net (mermaid) source** is at ![ECS infrastructure architecture](diagrams/ecs-infrastructure.png). Open it in https://app.diagrams.net via **File → Open From → Device**. The diagram reflects the actual **CloudFront HTTPS → ALB HTTP → ECS** implementation rather than incorrectly showing an ALB HTTPS listener.
+The mermaid diagram source**  ![ECS infrastructure architecture](diagrams/ecs-infrastructure.png). The diagram reflects the actual **CloudFront HTTPS → ALB HTTP → ECS** 
+
 
 ## Part 1 — Dockerfile and application
 
