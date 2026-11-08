@@ -182,6 +182,7 @@ jobs:
           echo "::error::Staging deployment verification failed"
           exit 1
 
+
       - name: Verify staging ALB target health
         run: |
           set -euo pipefail
@@ -191,16 +192,61 @@ jobs:
             --query 'TargetGroups[0].TargetGroupArn' \
             --output text)
 
-          aws elbv2 describe-target-health \
-            --target-group-arn "$TG_ARN" \
-            --output json > staging-target-health.json
+          SERVICE=devops-assessment-staging-service
 
-          jq -e '
-            (.TargetHealthDescriptions | length) > 0
-            and all(.TargetHealthDescriptions[]; .TargetHealth.State == "healthy")
-          ' staging-target-health.json
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster "$ECS_CLUSTER" \
+            --service-name "$SERVICE" \
+            --desired-status RUNNING \
+            --query 'taskArns[0]' \
+            --output text)
 
-          echo "Staging ALB targets are healthy"
+          if [[ -z "$TASK_ARN" || "$TASK_ARN" == "None" ]]; then
+            echo "::error::No running staging task found"
+            exit 1
+          fi
+
+          TASK_IP=$(aws ecs describe-tasks \
+            --cluster "$ECS_CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --query 'tasks[0].attachments[0].details[?name==`privateIPv4Address`].value | [0]' \
+            --output text)
+
+          if [[ -z "$TASK_IP" || "$TASK_IP" == "None" ]]; then
+            echo "::error::Could not resolve staging task IP"
+            exit 1
+          fi
+
+          echo "Expected staging target IP: $TASK_IP"
+
+          for attempt in {1..30}; do
+            aws elbv2 describe-target-health \
+              --target-group-arn "$TG_ARN" \
+              --output json > staging-target-health.json
+
+            echo "ALB health verification attempt: $attempt"
+
+            jq -r '
+              .TargetHealthDescriptions[] |
+              "\(.Target.Id) - \(.TargetHealth.State)"
+            ' staging-target-health.json
+
+            if jq -e --arg ip "$TASK_IP" '
+              any(
+                .TargetHealthDescriptions[];
+                .Target.Id == $ip
+                and .TargetHealth.State == "healthy"
+              )
+            ' staging-target-health.json > /dev/null; then
+              echo "Staging ALB target is healthy"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "::error::Staging ALB target did not become healthy"
+          exit 1
 
       - name: Capture staging evidence
         if: always()
