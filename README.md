@@ -1,4 +1,4 @@
-# Senior DevOps Engineer — Take-Home Assessment
+# Senior DevOps Engineer — Assessment
 
 This repository contains my solutions to the Senior DevOps Engineer Take-Home Assessment, covering AWS security, infrastructure automation, cloud architecture, containerisation, Infrastructure as Code (IaC), and CI/CD.
 
