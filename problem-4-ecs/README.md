@@ -20,7 +20,7 @@ A sample **FastAPI** application runs behind **Nginx**, with **Uvicorn** as the 
 
 ## Infrastructure diagram
 
-The mermaid diagram source**  ![ECS infrastructure architecture](diagrams/ecs-infrastructure.png). The diagram reflects the actual **CloudFront HTTPS → ALB HTTP → ECS** 
+The mermaid diagram source**  ![ECS infrastructure architecture](diagrams/ecs-infrastructure.png). The diagram reflects the actual **CloudFront HTTPS → ALB HTTP → ECS** `Browser --HTTPS--> CloudFront --HTTP + custom origin header--> ALB:80 --HTTP--> ECS:8080`
 
 
 ## Part 1 — Dockerfile and application
