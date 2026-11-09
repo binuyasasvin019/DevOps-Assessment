@@ -430,6 +430,23 @@ The repository currently provisions **one ECS service**. A production-ready exte
 - [ALB HTTPS listeners and certificates](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-https-listener.html)
 - [AWS WAF managed rule groups](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-list.html)
 - [Terraform S3 backend and native lockfile](https://developer.hashicorp.com/terraform/language/backend/s3)
+- [Terraform configuration language](https://developer.hashicorp.com/terraform/language)
+- [Terraform AWS Provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
+- [Terraform S3 backend and native state locking](https://developer.hashicorp.com/terraform/language/backend/s3)
+- [Terraform AWS VPC](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc)
+- [Terraform AWS Subnets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet)
+- [Terraform AWS NAT Gateway](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/nat_gateway)
+- [Terraform AWS Application Load Balancer](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb)
+- [Terraform AWS ALB Listener](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb_listener)
+- [Terraform AWS ECS Service](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ecs_service)
+- [Terraform AWS ECS Task Definition](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ecs_task_definition)
+- [Terraform AWS ECR Repository](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ecr_repository)
+- [Terraform AWS IAM Role Policy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy)
+- [Terraform AWS CloudFront Distribution](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudfront_distribution)
+- [Terraform AWS WAF Web ACL](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/wafv2_web_acl)
+- [Terraform AWS CloudWatch Log Group](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group)
+- [Terraform resource lifecycle](https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle)
+
 
 ## Security, assumptions and cleanup
 
